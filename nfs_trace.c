@@ -38,26 +38,12 @@
 static void _unregister_kprobes(void);
 static int _register_kprobes(void);
 static int handler_fault(struct kprobe *p, struct pt_regs *regs, int trapnr);
-static int handler_nfsd_read(struct kprobe *p, struct pt_regs *regs);
 static int handler_nfsd_vfs_read(struct kprobe *p, struct pt_regs *regs);
-static int handler_nfsd_open(struct kprobe *p, struct pt_regs *regs);
 
 static int nt_open(struct inode *inode, struct file *filp);
 static int nt_release(struct inode *inode, struct file *filp);
 static ssize_t nt_read(struct file *filp, char __user *usr_buf, size_t count, loff_t *ppos);
 
-
-static struct kprobe kp_nfsd_read = {
-	.symbol_name	= "nfsd_read",
-	.pre_handler = handler_nfsd_read,
-	.fault_handler = handler_fault,
-};
-
-static struct kprobe kp_nfsd_open = {
-	.symbol_name	= "nfsd_open",
-	.pre_handler = handler_nfsd_open,
-	.fault_handler = handler_fault,
-};
 
 static struct kprobe kp_nfsd_vfs_read = {
 	.symbol_name	= "nfsd_vfs_read",
@@ -86,11 +72,6 @@ static char * storage = NULL;
 static rkt_buf ringbuf;
 
 // https://elixir.bootlin.com/linux/v2.6.32.71/source/fs/nfsd/vfs.c#L1094
-static int handler_nfsd_read(struct kprobe *p, struct pt_regs *regs)
-{
-	return 0;
-}
-
 /*
 static __be32
 nfsd_vfs_read(struct svc_rqst *rqstp, struct svc_fh *fhp, struct file *file,
@@ -126,17 +107,6 @@ static int handler_nfsd_vfs_read(struct kprobe *p, struct pt_regs *regs)
 }
 
 /*
-__be32
-nfsd_open(struct svc_rqst *rqstp, struct svc_fh *fhp, int type,
-			int access, struct file **filp)
-*/
-
-static int handler_nfsd_open(struct kprobe *p, struct pt_regs *regs)
-{
-	return 0;
-}
-
-/*
 * fault_handler: this is called if an exception is generated for any
 * instruction within the pre- or post-handler, or when Kprobes
 * single-steps the probed instruction.
@@ -156,18 +126,6 @@ static int _register_kprobes(void)
 		printk(KERN_INFO "register_kprobe nfsd_vfs_read failed, returned %d\n", ret);
 		return ret;
 	}
-/*
-	ret = register_kprobe(&kp_nfsd_read);
-	if (ret < 0) {
-		printk(KERN_INFO "register_kprobe nfsd_read failed, returned %d\n", ret);
-		return ret;
-	}
-	ret = register_kprobe(&kp_nfsd_open);
-	if (ret < 0) {
-		printk(KERN_INFO "register_kprobe nfsd_open failed, returned %d\n", ret);
-		return ret;
-	}
-*/
 
 	return 0;
 }
@@ -175,10 +133,6 @@ static int _register_kprobes(void)
 static void _unregister_kprobes(void)
 {
 	unregister_kprobe(&kp_nfsd_vfs_read);
-/*
-	unregister_kprobe(&kp_nfsd_read);
-	unregister_kprobe(&kp_nfsd_open);
-*/
 }
 
 static int nt_open(struct inode *inode, struct file *filp)
@@ -291,11 +245,6 @@ exit_err:
 static void __exit kprobe_exit(void)
 {
 	_unregister_kprobes();
-
-/*
-  if (storage)
-		kfree(storage);
-*/
 
 	cdev_del(&g_nt_dev.cdev);
 	device_destroy(g_device_class, MKDEV(g_nt_dev.major, g_nt_dev.minor));

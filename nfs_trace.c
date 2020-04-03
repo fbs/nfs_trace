@@ -79,8 +79,8 @@ typedef struct {
   int in_use;
 } nt_dev_t;
 
-static nt_dev_t nt_dev;
-static struct class * device_class;
+static nt_dev_t g_nt_dev;
+static struct class * g_device_class;
 
 static char * storage = NULL;
 static rkt_buf ringbuf;
@@ -183,18 +183,18 @@ static void _unregister_kprobes(void)
 
 static int nt_open(struct inode *inode, struct file *filp)
 {
-  if (nt_dev.in_use != 0)
+  if (g_nt_dev.in_use != 0)
 		return -EBUSY;
 
-	nt_dev.in_use = 1;
-	filp->private_data = (void *)&nt_dev;
+	g_nt_dev.in_use = 1;
+	filp->private_data = (void *)&g_nt_dev;
 	pr_info(DEV_NAME " opened\n");
 	return 0;
 }
 
 static int nt_release(struct inode *inode, struct file *filp)
 {
-  nt_dev.in_use = 0;
+  g_nt_dev.in_use = 0;
 	return 0;
 }
 
@@ -239,31 +239,31 @@ static int __init kprobe_init(void)
 		return -ENOMEM;
 	}
 
-  nt_dev.in_use = 0;
-	nt_dev.major = MAJOR(dev);
-	nt_dev.minor = 0;
+  g_nt_dev.in_use = 0;
+	g_nt_dev.major = MAJOR(dev);
+	g_nt_dev.minor = 0;
 
-	device_class = class_create(THIS_MODULE, DEV_NAME);
-	if (IS_ERR(device_class)) {
+	g_device_class = class_create(THIS_MODULE, DEV_NAME);
+	if (IS_ERR(g_device_class)) {
 		pr_err("can't allocate device class\n");
 		ret = -EFAULT;
 		goto exit_err;
 	}
 
-	device_num = MKDEV(nt_dev.major, nt_dev.minor);
-	cdev_init(&nt_dev.cdev, &nt_fops);
-	if (cdev_add(&nt_dev.cdev, device_num, 1) < 0)
+	device_num = MKDEV(g_nt_dev.major, g_nt_dev.minor);
+	cdev_init(&g_nt_dev.cdev, &nt_fops);
+	if (cdev_add(&g_nt_dev.cdev, device_num, 1) < 0)
   {
 		pr_err("%s: chrdev allocation failed\n", DEV_NAME);
 		ret = -EFAULT;
 		goto exit_err;
   }
 
-	device = device_create(device_class, NULL, device_num, NULL, DEV_NAME "%d", 0);
+	device = device_create(g_device_class, NULL, device_num, NULL, DEV_NAME "%d", 0);
 	if (IS_ERR(device))
   {
 	  pr_err("%s: device creation  failed\n", DEV_NAME);
-	  cdev_del(&nt_dev.cdev);
+	  cdev_del(&g_nt_dev.cdev);
 		goto exit_err;
   }
 
@@ -277,9 +277,9 @@ static int __init kprobe_init(void)
 	return 0;
 
 exit_err:
-	cdev_del(&nt_dev.cdev);
-	if (device_class)
-		class_destroy(device_class);
+	cdev_del(&g_nt_dev.cdev);
+	if (g_device_class)
+		class_destroy(g_device_class);
 
 	unregister_chrdev_region(dev, 1);
 
@@ -297,10 +297,10 @@ static void __exit kprobe_exit(void)
 		kfree(storage);
 */
 
-	cdev_del(&nt_dev.cdev);
-	device_destroy(device_class, MKDEV(nt_dev.major, nt_dev.minor));
-  class_destroy(device_class);
-  unregister_chrdev_region(MKDEV(nt_dev.major, nt_dev.minor), 1);
+	cdev_del(&g_nt_dev.cdev);
+	device_destroy(g_device_class, MKDEV(g_nt_dev.major, g_nt_dev.minor));
+  class_destroy(g_device_class);
+  unregister_chrdev_region(MKDEV(g_nt_dev.major, g_nt_dev.minor), 1);
 
   pr_info("nfs_trace stopped\n");
 }

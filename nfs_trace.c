@@ -1,29 +1,22 @@
-/*
- ** NOTE: This example is works on x86 and powerpc.
- ** Here's a sample kernel module showing the use of kprobes to dump a
- ** stack trace and selected registers when do_fork() is called.
- **
- ** For more information on theory of operation of kprobes, see
- ** Documentation/kprobes.txt
- **
- ** You will see the trace data in /var/log/messages and on the console
- ** whenever do_fork() is invoked to create a new process.
- **/
-
-#include <linux/kernel.h>
-#include <linux/module.h>
-#include <linux/kprobes.h>
-#include <linux/fs.h>
-#include <linux/path.h>
-#include <linux/device.h>
+#include <asm/uaccess.h>
 #include <linux/cdev.h>
-#include<linux/types.h>
-#include<linux/kdev_t.h>
-#include<linux/gfp.h>
+#include <linux/cpumask.h>
+#include <linux/device.h>
+#include <linux/fs.h>
+#include <linux/gfp.h>
+#include <linux/kdev_t.h>
+#include <linux/kernel.h>
+#include <linux/kprobes.h>
+#include <linux/module.h>
+#include <linux/mutex.h>
+#include <linux/path.h>
+#include <linux/types.h>
+#include <linux/vmalloc.h>
 
-#include <linux/printk.h>
 #include <linux/err.h>
+#include <linux/printk.h>
 
+MODULE_LICENSE("GPL");
 
 #define ARG0 (regs->di)
 #define ARG1 (regs->si)
@@ -31,9 +24,25 @@
 #define ARG3 (regs->cx)
 
 #define DEV_NAME "nfs_trace"
-#define RINGBUF_SIZE (2 * 1024 * 1024)
+#define RING_BUF_SIZE (1024UL * sizeof(nt_ringbuf_entry))
 
-#include "rkt_buf.c"
+typedef struct {
+  char type;
+  char path[255];
+} nt_ringbuf_entry;
+
+// Buf is full when head == tail -1
+typedef struct {
+  char *buf;   // storage itself
+  __u64 head;  // head pointer offset
+  __u64 tail;  // tail pointer offset
+  __u64 drops; // dropped due to buffer full
+} nt_ringbuf;
+
+typedef struct {
+  dev_t dev;
+  struct cdev cdev;
+} nt_device;
 
 static void _unregister_kprobes(void);
 static int _register_kprobes(void);
@@ -42,219 +51,320 @@ static int handler_nfsd_vfs_read(struct kprobe *p, struct pt_regs *regs);
 
 static int nt_open(struct inode *inode, struct file *filp);
 static int nt_release(struct inode *inode, struct file *filp);
-static ssize_t nt_read(struct file *filp, char __user *usr_buf, size_t count, loff_t *ppos);
+static ssize_t nt_read(struct file *filp, char __user *usr_buf, size_t count,
+                       loff_t *ppos);
 
+static int rb_init(nt_ringbuf *rb);
+static void rb_free(nt_ringbuf *rb);
 
 static struct kprobe kp_nfsd_vfs_read = {
-	.symbol_name	= "nfsd_vfs_read",
-	.pre_handler = handler_nfsd_vfs_read,
-	.fault_handler = handler_fault,
+    .symbol_name = "nfsd_vfs_read",
+    .pre_handler = handler_nfsd_vfs_read,
+    .fault_handler = handler_fault,
 };
 
-struct file_operations nt_fops = {
-  .owner          = THIS_MODULE,
-  .open           = nt_open,
-  .read           = nt_read,
-  .release        = nt_release,
+struct file_operations g_fops = {
+    .owner = THIS_MODULE,
+    .open = nt_open,
+    .read = nt_read,
+    .release = nt_release,
 };
 
-typedef struct {
-  unsigned int major;
-	unsigned int minor;
-	struct cdev cdev;
-  int in_use;
-} nt_dev_t;
+static struct class *g_device_class = NULL;
+static int g_device_major = 0;
+static int g_num_devices = 0;
+static int g_consumers = 0;
+static nt_device *g_devices = NULL;
 
-static nt_dev_t g_nt_dev;
-static struct class * g_device_class;
+static nt_ringbuf *g_ringbufs = NULL;
 
-static char * storage = NULL;
-static rkt_buf ringbuf;
+static DEFINE_MUTEX(g_lock);
 
-// https://elixir.bootlin.com/linux/v2.6.32.71/source/fs/nfsd/vfs.c#L1094
-/*
-static __be32
-nfsd_vfs_read(struct svc_rqst *rqstp, struct svc_fh *fhp, struct file *file,
-              loff_t offset, struct kvec *vec, int vlen, unsigned long *count)
-*/
+static int nt_open(struct inode *inode, struct file *filp) {
+  nt_ringbuf *rb;
+  int ret = 0;
+  int cpu = iminor(filp->f_path.dentry->d_inode);
 
-static int handler_nfsd_vfs_read(struct kprobe *p, struct pt_regs *regs)
-{
-	static char buf[256];
-	unsigned long inode;
-	struct file * file = (struct file *) ARG2;
-	char * pathname;
-  int size;
-
-  buf[255] = '\n';
-	if (file == NULL)
-	{
-		printk(KERN_INFO "no file\n");
-		return 0;
-	}
-
-	inode = file->f_path.dentry->d_inode->i_ino;
-	pathname = d_path(&file->f_path, buf, 254);
-
-  size = (256 - (pathname - buf)); 
-
-  rkt_buf_write(&ringbuf, pathname, size);
-
-  pr_info("Wrote %d to buf\n", size);
-  
-
-	return 0;
-}
-
-/*
-* fault_handler: this is called if an exception is generated for any
-* instruction within the pre- or post-handler, or when Kprobes
-* single-steps the probed instruction.
-*/
-static int handler_fault(struct kprobe *p, struct pt_regs *regs, int trapnr)
-{
-	printk(KERN_INFO "fault_handler: p->addr = 0x%p, trap #%dn",
-		p->addr, trapnr);
-	return 0;
-}
-
-static int _register_kprobes(void)
-{
-	int ret = 0;
-	ret = register_kprobe(&kp_nfsd_vfs_read);
-	if (ret < 0) {
-		printk(KERN_INFO "register_kprobe nfsd_vfs_read failed, returned %d\n", ret);
-		return ret;
-	}
-
-	return 0;
-}
-
-static void _unregister_kprobes(void)
-{
-	unregister_kprobe(&kp_nfsd_vfs_read);
-}
-
-static int nt_open(struct inode *inode, struct file *filp)
-{
-  if (g_nt_dev.in_use != 0)
-		return -EBUSY;
-
-	g_nt_dev.in_use = 1;
-	filp->private_data = (void *)&g_nt_dev;
-	pr_info(DEV_NAME " opened\n");
-	return 0;
-}
-
-static int nt_release(struct inode *inode, struct file *filp)
-{
-  g_nt_dev.in_use = 0;
-	return 0;
-}
-
-static ssize_t nt_read(struct file *filp, char __user *usr_buf, size_t len, loff_t *ppos)
-{
-  int result;
-  unsigned int current_level = rkt_buf_level(&ringbuf);
-
-  if (len > current_level) {
-      len = current_level;
+  if (cpu > g_num_devices) {
+    pr_err("cpu(%d) > g_ringbufs(%d)\n", cpu, g_num_devices);
+    return -EFAULT;
   }
 
-  result = rkt_buf_read(&ringbuf, usr_buf, len);
+  mutex_lock(&g_lock);
+  rb = &g_ringbufs[cpu];
 
-  if(result) {
-      printk(KERN_ALERT "Error: Rocket-echo buffer read failed with code: %d\n", result);
+  if (rb->buf != NULL) {
+    ret = -EBUSY;
+    goto exit;
+  }
+
+  if (rb_init(rb)) {
+    ret = -ENOMEM;
+    goto exit;
+  }
+
+  g_consumers++;
+  if (g_consumers == 1)
+    _register_kprobes();
+
+  filp->private_data = rb;
+
+  pr_info("Consumer registered, total: %d\n", g_consumers);
+
+exit:
+  mutex_unlock(&g_lock);
+  return ret;
+}
+
+static int nt_release(struct inode *inode, struct file *filp) {
+  mutex_lock(&g_lock);
+  rb_free(filp->private_data);
+  g_consumers--;
+  if (!g_consumers)
+    _unregister_kprobes();
+
+  pr_info("Consumer released, total: %d\n", g_consumers);
+  mutex_unlock(&g_lock);
+  return 0;
+}
+
+static ssize_t nt_read(struct file *filp, char __user *usr_buf, size_t len,
+                       loff_t *ppos) {
+  nt_ringbuf *rb = filp->private_data;
+  __u64 head = 0, tail = 0;
+  __u64 remain = 0, size = 0;
+  __u64 buf_data = 0;
+  __u32 loop_idx = 0;
+  /* nt_ringbuf_entry * entry = NULL; */
+
+  head = rb->head;
+  tail = rb->tail;
+
+  if (head == tail)
+    return -EAGAIN;
+
+  /* entry = (rt_ringbuf_entry *) (rb_>buf + tail); */
+
+  buf_data = (tail < head) ? head - tail : RING_BUF_SIZE - tail + head;
+
+  remain = len = min(len, buf_data);
+  pr_info("head: %lld, tail: %lld, remain: %lld\n", head, tail, remain);
+  while (remain) {
+    size = (tail < head) ? head - tail : RING_BUF_SIZE - tail;
+    size = min(len, size);
+
+    // returns the amount of bytes NOT copied
+    if(copy_to_user(usr_buf, rb->buf + tail, size))
       return -EFAULT;
+
+    usr_buf += size;
+    remain -= size;
+    tail = (tail + size) % RING_BUF_SIZE;
+
+    BUG_ON(loop_idx++ > 3);
   }
 
-  pr_info("Writing %d to user\n", len);
-
+  rb->tail = tail;
+  pr_info("Updated tail to %lld\n", tail);
   return len;
 }
 
-static int __init kprobe_init(void)
-{
-	int ret = 0;
-	dev_t dev;
-	struct device *device;
-	int device_num;
-
-  storage = kmalloc(RINGBUF_SIZE, GFP_KERNEL);
-  if(storage == NULL) {
-    pr_err("%s: failed to allocate ring buf\n", DEV_NAME);
+// allocate storage for a ringbuf
+static int rb_init(nt_ringbuf *rb) {
+  rb->head = rb->tail = rb->drops = 0;
+  rb->buf = vmalloc(RING_BUF_SIZE);
+  if (!rb->buf) {
+    pr_err("cannot allocate ring buffer storage\n");
     return -ENOMEM;
   }
 
-  rkt_buf_init(&ringbuf, storage, RINGBUF_SIZE);
+  return 0;
+}
 
-	if (alloc_chrdev_region(&dev, 0, 1, DEV_NAME) < 0) {
-		pr_err("%s: could not allocate major number\n", DEV_NAME);
-		return -ENOMEM;
-	}
+static void rb_free(nt_ringbuf *rb) {
+  if (rb->buf)
+    vfree(rb->buf);
+  rb->head = rb->tail = rb->drops = 0;
+  rb->buf = NULL;
+}
 
-  g_nt_dev.in_use = 0;
-	g_nt_dev.major = MAJOR(dev);
-	g_nt_dev.minor = 0;
+// https://elixir.bootlin.com/linux/v2.6.32.71/source/fs/nfsd/vfs.c#L1094
+/*
+  static __be32
+  nfsd_vfs_read(struct svc_rqst *rqstp, struct svc_fh *fhp, struct file *file,
+  loff_t offset, struct kvec *vec, int vlen, unsigned long *count)
+*/
+static int handler_nfsd_vfs_read(struct kprobe *p, struct pt_regs *regs) {
+  char buf[255];
+  struct file *file = (struct file *)ARG2;
+  char *path;
+  int size;
+  int cpu;
+  nt_ringbuf *rb;
+  nt_ringbuf_entry *rbe;
+  __u64 head = 0, tail = 0, free = 0;
 
-	g_device_class = class_create(THIS_MODULE, DEV_NAME);
-	if (IS_ERR(g_device_class)) {
-		pr_err("can't allocate device class\n");
-		ret = -EFAULT;
-		goto exit_err;
-	}
+  if (file == NULL)
+    return 0;
 
-	device_num = MKDEV(g_nt_dev.major, g_nt_dev.minor);
-	cdev_init(&g_nt_dev.cdev, &nt_fops);
-	if (cdev_add(&g_nt_dev.cdev, device_num, 1) < 0)
-  {
-		pr_err("%s: chrdev allocation failed\n", DEV_NAME);
-		ret = -EFAULT;
-		goto exit_err;
+  cpu = smp_processor_id();
+  rb = &g_ringbufs[cpu];
+
+  if (rb->buf == NULL)
+    return 0;
+
+  preempt_disable();
+
+  head = rb->head;
+  tail = rb->tail;
+
+  if (tail > head)
+    free = tail - head - 1;
+  else
+    free = RING_BUF_SIZE + tail - head - 1;
+
+  if (likely(free > sizeof(nt_ringbuf_entry))) {
+    rbe = (nt_ringbuf_entry *)(rb->buf + head);
+    rbe->type = 'r';
+    path = d_path(&file->f_path, buf, 254);
+    size = 255 - (path - buf);
+    memcpy(rbe->path, path, size);
+    rbe->path[size] = '\n';
+
+    rb->head = (head + sizeof(nt_ringbuf_entry)) % RING_BUF_SIZE;
+    pr_info("Got path: %c %s\n", rbe->type, rbe->path);
+  } else {
+    rb->drops++;
+  }
+  preempt_enable();
+  return 0;
+}
+
+/*
+ * fault_handler: this is called if an exception is generated for any
+ * instruction within the pre- or post-handler, or when Kprobes
+ * single-steps the probed instruction.
+ */
+static int handler_fault(struct kprobe *p, struct pt_regs *regs, int trapnr) {
+  printk(KERN_INFO "fault_handler: p->addr = 0x%p, trap #%dn", p->addr, trapnr);
+  return 0;
+}
+
+static int _register_kprobes(void) {
+  int ret = 0;
+  ret = register_kprobe(&kp_nfsd_vfs_read);
+  if (ret < 0) {
+    pr_info("register_kprobe nfsd_vfs_read failed, returned %d\n", ret);
+    return ret;
   }
 
-	device = device_create(g_device_class, NULL, device_num, NULL, DEV_NAME "%d", 0);
-	if (IS_ERR(device))
-  {
-	  pr_err("%s: device creation  failed\n", DEV_NAME);
-	  cdev_del(&g_nt_dev.cdev);
-		goto exit_err;
-  }
+  pr_info("Kprobe registered\n");
+  return 0;
+}
 
-	if (_register_kprobes())
-  {
-		ret = 1;
+static void _unregister_kprobes(void) {
+  unregister_kprobe(&kp_nfsd_vfs_read);
+  pr_info("Kprobe unregistered\n");
+}
+
+static int __init nfs_trace_init(void) {
+  int ret = 0;
+  dev_t dev = 0;
+  struct device *device;
+  int idx;
+
+  g_num_devices = num_possible_cpus();
+
+  g_ringbufs = kzalloc(sizeof(nt_ringbuf) * g_num_devices, GFP_KERNEL);
+  if (!g_ringbufs) {
+    pr_err("could not allocate ringbuf info");
+    return -ENOMEM;
+  }
+  for (idx = 0; idx < g_num_devices; idx++)
+    g_ringbufs[idx].buf = 0;
+
+  if (alloc_chrdev_region(&dev, 0, g_num_devices, DEV_NAME) < 0) {
+    pr_err("could not allocate major number\n");
+    ret = -ENOMEM;
     goto exit_err;
   }
 
-  pr_info("nfs_trace started\n");
-	return 0;
+  g_device_class = class_create(THIS_MODULE, DEV_NAME);
+  if (IS_ERR(g_device_class)) {
+    pr_err("could not allocate device class\n");
+    ret = -EFAULT;
+    goto exit_err;
+  }
+
+  g_device_major = MAJOR(dev);
+
+  g_devices = kmalloc(sizeof(nt_device) * g_num_devices, GFP_KERNEL);
+  if (!g_devices) {
+    pr_err("could not allocate device array\n");
+    ret = -ENOMEM;
+    goto exit_err;
+  }
+
+  for (idx = 0; idx < g_num_devices; idx++) {
+    cdev_init(&g_devices[idx].cdev, &g_fops);
+    g_devices[idx].dev = MKDEV(g_device_major, idx);
+    if (cdev_add(&g_devices[idx].cdev, g_devices[idx].dev, 1) < 0) {
+      pr_err("could not create chardev\n");
+      ret = -EFAULT;
+      goto exit_err;
+    }
+
+    device = device_create(g_device_class, NULL, g_devices[idx].dev, NULL,
+                           DEV_NAME "%d", idx);
+    if (IS_ERR(device)) {
+      pr_err("error creating device\n");
+      ret = -EFAULT;
+      goto exit_err;
+    }
+  }
+
+  pr_info("nfs_trace started, major: %d\n", g_device_major);
+  return 0;
 
 exit_err:
-	cdev_del(&g_nt_dev.cdev);
-	if (g_device_class)
-		class_destroy(g_device_class);
+  if (g_devices) {
+    for (idx = 0; idx < g_num_devices; idx++) {
+      device_destroy(g_device_class, g_devices[idx].dev);
+      cdev_del(&g_devices[idx].cdev);
+    }
+    kfree(g_devices);
+  }
+  if (g_device_class)
+    class_destroy(g_device_class);
 
-	unregister_chrdev_region(dev, 1);
+  if (dev)
+    unregister_chrdev_region(dev, g_num_devices);
 
-	return ret;
-	
+  kfree(g_ringbufs);
 
+  return ret;
 }
 
-static void __exit kprobe_exit(void)
-{
-	_unregister_kprobes();
+static void __exit nfs_trace_exit(void) {
+  int idx;
 
-	cdev_del(&g_nt_dev.cdev);
-	device_destroy(g_device_class, MKDEV(g_nt_dev.major, g_nt_dev.minor));
+  _unregister_kprobes();
+
+  for (idx = 0; idx < g_num_devices; idx++) {
+    device_destroy(g_device_class, g_devices[idx].dev);
+    cdev_del(&g_devices[idx].cdev);
+  }
+  kfree(g_devices);
+  class_unregister(g_device_class);
   class_destroy(g_device_class);
-  unregister_chrdev_region(MKDEV(g_nt_dev.major, g_nt_dev.minor), 1);
+  unregister_chrdev_region(MKDEV(g_device_major, 0), g_num_devices);
+
+  for (idx = 0; idx < g_num_devices; idx++) {
+    rb_free(&g_ringbufs[idx]);
+  }
+  kfree(g_ringbufs);
 
   pr_info("nfs_trace stopped\n");
 }
 
-module_init(kprobe_init)
-module_exit(kprobe_exit)
-MODULE_LICENSE("GPL");
-
+module_init(nfs_trace_init) module_exit(nfs_trace_exit)

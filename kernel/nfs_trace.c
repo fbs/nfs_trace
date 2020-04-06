@@ -55,7 +55,7 @@ static int handler_nfsd_vfs_read(struct kprobe *p, struct pt_regs *regs);
 
 static int nt_open(struct inode *inode, struct file *filp);
 static int nt_release(struct inode *inode, struct file *filp);
-static ssize_t nt_read(struct file *filp, char __user *usr_buf, size_t count,
+static ssize_t nt_read(struct file *filp, char __user *usr_buf, size_t usr_len,
                        loff_t *ppos);
 static unsigned int nt_poll(struct file *filp, poll_table *wait);
 
@@ -157,14 +157,16 @@ static int nt_release(struct inode *inode, struct file *filp) {
   return 0;
 }
 
-static ssize_t nt_read(struct file *filp, char __user *usr_buf, size_t len,
+static ssize_t nt_read(struct file *filp, char __user *usr_buf, size_t usr_len,
                        loff_t *ppos) {
   nt_ringbuf *rb = filp->private_data;
   __u64 head = 0, tail = 0;
-  __u64 remain = 0, size = 0;
-  __u64 buf_data = 0;
-  __u32 loop_idx = 0;
+  __u64 buf_data = 0, size = 0;
+  __s64 remain = 0;
 
+  char __user *usr_buf_orig = usr_buf;
+  ssize_t ret = 0;
+  int loop_idx = 0;
 
   if (rb->head == rb->tail) {
     if (filp->f_flags & O_NONBLOCK) {
@@ -177,26 +179,34 @@ static ssize_t nt_read(struct file *filp, char __user *usr_buf, size_t len,
   head = rb->head;
   tail = rb->tail;
 
+  // total amount of event data available
   buf_data = (tail < head) ? head - tail : RING_BUF_SIZE - tail + head;
 
-  remain = len = min(len, buf_data);
-  while (remain) {
+  remain = min(usr_len, buf_data);
+  ret = remain;
+  while (remain > 0) {
+    //
     size = (tail < head) ? head - tail : RING_BUF_SIZE - tail;
-    size = min(len, size);
+    size = min(remain, size);
 
     // returns the amount of bytes NOT copied
     if (copy_to_user(usr_buf, rb->buf + tail, size))
+    {
+      pr_info("Failed to copy_to_user to 0x%p(0x%p) 0x%llx 0x%llx\n", usr_buf, usr_buf_orig, tail, size);
       return -EFAULT;
+    }
 
     usr_buf += size;
     remain -= size;
     tail = (tail + size) % RING_BUF_SIZE;
 
-    BUG_ON(loop_idx++ > 3);
+    // Max 2 copies. First is tail to end of buf, second is start to head
+    BUG_ON(loop_idx++ > 2);
   }
+  BUG_ON(remain < 0);
 
   rb->tail = tail;
-  return len;
+  return ret;
 }
 
 // allocate storage for a ringbuf

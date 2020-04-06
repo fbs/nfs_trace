@@ -1,3 +1,6 @@
+// Copyright (C) 2020 bas smit
+// SPDX-License-Identifier:  GPL-2.0-or-later
+
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>

@@ -13,24 +13,16 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
+#include <glob.h>
+#include <string.h>
 
 #include "kernel/nfs_trace.h"
 
-#define CPUS 2
+const char * device_pattern = "/dev/nfs_trace*";
 
 int has_exit_sig = 0;
 
 void sig_handler(int sig_num) { has_exit_sig = 1; }
-
-int opendev(int id) {
-  char buf[64] = {0};
-
-  if (snprintf(buf, 64, "/dev/nfs_trace%d", id) < 0) {
-    return -1;
-  }
-
-  return open(buf, O_RDONLY);
-}
 
 int read_events(int fd) {
   uint64_t count = 0;
@@ -83,12 +75,44 @@ exit:
   return events;
 }
 
-int main(void) {
-  int fds[CPUS];
-  int events = 0;
+int globerr(const char * path, int err)
+{
+  return 1;
+}
 
-  for (int i = 0; i < CPUS; i++) {
-    int fd = opendev(i);
+int main(void) {
+  int * fds = NULL;
+  int events = 0;
+  int cpus = 0;
+
+  glob_t devices;
+
+  int ret = glob(device_pattern, 0, globerr, &devices);
+  if (ret < 0)
+  {
+    switch (ret)
+    {
+    case GLOB_NOMATCH:
+      fprintf(stderr, "nfs_trace devices not found (%s)\n", device_pattern);
+      break;
+    case GLOB_NOSPACE:
+      fprintf(stderr, "could not allocate memory\n");
+      break;
+    case GLOB_ABORTED:
+      fprintf(stderr, "glob error");
+      break;
+    default:
+      break;
+    }
+    return 1;
+  }
+
+  cpus = devices.gl_pathc;
+  fds = malloc(cpus * sizeof(int));
+  memset(fds, 0, cpus);
+
+  for (int i = 0; i < cpus; i++) {
+    int fd = open(devices.gl_pathv[i], O_RDONLY);
     if (fd < 0) {
       char buf[64] = {0};
       snprintf(buf, 64, "Failed to open nfs_trace%d", i);
@@ -98,10 +122,10 @@ int main(void) {
     fds[i] = fd;
   }
 
-  events = loop(fds, CPUS);
+  events = loop(fds, cpus);
   fprintf(stderr, "Handled events: %d\n", events);
 
-  for (int i = 0; i < CPUS; i++) {
+  for (int i = 0; i < cpus; i++) {
     uint64_t dropped, events;
     ioctl(fds[i], NT_IOC_DROPPED, &dropped);
     ioctl(fds[i], NT_IOC_EVENTS, &events);
@@ -110,5 +134,6 @@ int main(void) {
     close(fds[i]);
   }
 
+  free(fds);
   return 0;
 }

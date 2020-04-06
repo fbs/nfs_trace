@@ -2,7 +2,7 @@
 
 CFLAGS += -Wall -D_FORTIFY_SOURCE=2 -O2 -g -Werror=format-security -Werror=implicit-function-declaration
 
-all: module userspace
+all: module tail
 
 module:
 	make -C kernel module
@@ -19,5 +19,5 @@ module-load:
 cycle:
 	make -C kernel cycle
 
-userspace: userspace.c
+tail: tail.c
 	gcc -std=c99 $(CFLAGS) -o $@ $<

@@ -99,14 +99,14 @@ int main(void) {
   }
 
   events = loop(fds, CPUS);
-  printf("Handled events: %d\n", events);
+  fprintf(stderr, "Handled events: %d\n", events);
 
   for (int i = 0; i < CPUS; i++) {
     uint64_t dropped, events;
     ioctl(fds[i], NT_IOC_DROPPED, &dropped);
     ioctl(fds[i], NT_IOC_EVENTS, &events);
-    printf("Events  on cpu %d: %ld\n", i, events);
-    printf("Dropped on cpu %d: %ld\n", i, dropped);
+    fprintf(stderr, "Events  on cpu %d: %ld\n", i, events);
+    fprintf(stderr, "Dropped on cpu %d: %ld\n", i, dropped);
     close(fds[i]);
   }
 

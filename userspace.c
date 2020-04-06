@@ -42,7 +42,7 @@ int read_events(int fd) {
 
   for (int i = 0; i < ret; i += sizeof(nt_event_t)) {
     nt_event_t *event = (nt_event_t *)(buf + i);
-    printf("%d - %c - %s\n", i, event->type, event->path);
+    printf("%c:%s\n", event->type, event->path);
     count++;
   }
 

@@ -294,6 +294,9 @@ static int handler_fault(struct kprobe *p, struct pt_regs *regs, int trapnr) {
 
 static int _register_kprobes(void) {
   int ret = 0;
+
+  // Avoid EINVAL after attach/detach cycle
+  kp_nfsd_vfs_read.addr = 0;
   ret = register_kprobe(&kp_nfsd_vfs_read);
   if (ret < 0) {
     pr_info("register_kprobe nfsd_vfs_read failed, returned %d\n", ret);

@@ -43,12 +43,12 @@ typedef struct {
 
 // Buf is full when head == tail -1
 typedef struct {
-  char *buf;   // storage itself
-  __u64 head;  // head pointer offset
-  __u64 tail;  // tail pointer offset
+  __u32 head;  // head pointer offset
+  __u32 tail;  // tail pointer offset
   __u64 drops; // dropped due to buffer full
   __u64 events; // total events
   wait_queue_head_t *wq;
+  char *buf;   // storage itself
 } nt_ringbuf;
 
 typedef struct {
@@ -186,9 +186,9 @@ static int nt_release(struct inode *inode, struct file *filp) {
 static ssize_t nt_read(struct file *filp, char __user *usr_buf, size_t usr_len,
                        loff_t *ppos) {
   nt_ringbuf *rb = filp->private_data;
-  __u64 head = 0, tail = 0;
-  __u64 buf_data = 0, size = 0;
-  __s64 remain = 0;
+  __u32 head = 0, tail = 0;
+  __u32 buf_data = 0;
+  __s32 size = 0, remain = 0;
 
   char __user *usr_buf_orig = usr_buf;
   ssize_t ret = 0;
@@ -208,7 +208,7 @@ static ssize_t nt_read(struct file *filp, char __user *usr_buf, size_t usr_len,
   // total amount of event data available
   buf_data = (tail < head) ? head - tail : RING_BUF_SIZE - tail + head;
 
-  remain = min(usr_len, buf_data);
+  remain = min((__u32)usr_len, buf_data);
   ret = remain;
   while (remain > 0) {
     //
@@ -218,7 +218,7 @@ static ssize_t nt_read(struct file *filp, char __user *usr_buf, size_t usr_len,
     // returns the amount of bytes NOT copied
     if (copy_to_user(usr_buf, rb->buf + tail, size))
     {
-      pr_info("Failed to copy_to_user to 0x%p(0x%p) 0x%llx 0x%llx\n", usr_buf, usr_buf_orig, tail, size);
+      pr_info("Failed to copy_to_user to 0x%p(0x%p) 0x%x 0x%x\n", usr_buf, usr_buf_orig, tail, size);
       return -EFAULT;
     }
 
@@ -268,7 +268,7 @@ static int handler_nfsd_vfs_read(struct kprobe *p, struct pt_regs *regs) {
   int cpu;
   nt_ringbuf *rb;
   nt_ringbuf_entry *rbe;
-  __u64 head = 0, tail = 0, free = 0;
+  __u32 head = 0, tail = 0, free = 0;
 
   if (file == NULL)
     return 0;

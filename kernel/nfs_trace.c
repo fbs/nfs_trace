@@ -17,11 +17,16 @@
 #include <linux/vmalloc.h>
 #include <linux/wait.h>
 #include <linux/poll.h>
+#include <linux/ioctl.h>
 
 #include <linux/err.h>
 #include <linux/printk.h>
 
 MODULE_LICENSE("GPL");
+
+#define IOC_MAGIC 'x'
+#define NT_DROPPED _IOR(IOC_MAGIC, 1, __u64)
+#define NT_EVENTS  _IOR(IOC_MAGIC, 2, __u64)
 
 #define ARG0 (regs->di)
 #define ARG1 (regs->si)
@@ -42,6 +47,7 @@ typedef struct {
   __u64 head;  // head pointer offset
   __u64 tail;  // tail pointer offset
   __u64 drops; // dropped due to buffer full
+  __u64 events; // total events
   wait_queue_head_t *wq;
 } nt_ringbuf;
 
@@ -61,6 +67,7 @@ static int nt_release(struct inode *inode, struct file *filp);
 static ssize_t nt_read(struct file *filp, char __user *usr_buf, size_t usr_len,
                        loff_t *ppos);
 static unsigned int nt_poll(struct file *filp, poll_table *wait);
+static long nt_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
 
 static int rb_init(nt_ringbuf *rb);
 static void rb_free(nt_ringbuf *rb);
@@ -77,6 +84,7 @@ struct file_operations g_fops = {
     .read = nt_read,
     .release = nt_release,
     .poll = nt_poll,
+    .unlocked_ioctl = nt_ioctl,
 };
 
 static struct class *g_device_class = NULL;
@@ -96,6 +104,21 @@ static unsigned int nt_poll(struct file *filp, poll_table *wait)
   if (rb->head != rb->tail)
     return POLLIN | POLLRDNORM;
   return 0;
+}
+
+static long nt_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
+  nt_ringbuf *rb = filp->private_data;
+  switch (cmd) {
+  case NT_DROPPED:
+    return rb->drops;
+    break;
+  case NT_EVENTS:
+    return rb->events;
+    break;
+  default:
+    return -EINVAL;
+    break;
+  }
 }
 
 static int nt_open(struct inode *inode, struct file *filp) {
@@ -214,7 +237,7 @@ static ssize_t nt_read(struct file *filp, char __user *usr_buf, size_t usr_len,
 
 // allocate storage for a ringbuf
 static int rb_init(nt_ringbuf *rb) {
-  rb->head = rb->tail = rb->drops = 0;
+  rb->head = rb->tail = rb->drops = rb->events = 0;
   rb->buf = vmalloc(RING_BUF_SIZE);
   if (!rb->buf) {
     pr_err("cannot allocate ring buffer storage\n");
@@ -227,7 +250,7 @@ static int rb_init(nt_ringbuf *rb) {
 static void rb_free(nt_ringbuf *rb) {
   if (rb->buf)
     vfree(rb->buf);
-  rb->head = rb->tail = rb->drops = 0;
+  rb->head = rb->tail = rb->drops = rb->events = 0;
   rb->buf = NULL;
 }
 
@@ -273,9 +296,9 @@ static int handler_nfsd_vfs_read(struct kprobe *p, struct pt_regs *regs) {
     path = d_path(&file->f_path, buf, 254);
     size = 255 - (path - buf);
     memcpy(rbe->path, path, size);
-    rbe->path[size] = '\n';
 
     rb->head = (head + sizeof(nt_ringbuf_entry)) % RING_BUF_SIZE;
+    rb->events++;
   } else {
     rb->drops++;
   }

@@ -12,6 +12,12 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <sys/ioctl.h>
+
+
+#define IOC_MAGIC 'x'
+#define NT_DROPPED _IOR(IOC_MAGIC, 1, uint64_t)
+#define NT_EVENTS  _IOR(IOC_MAGIC, 2, uint64_t)
 
 #define CPUS 2
 
@@ -58,6 +64,7 @@ int loop(int *fds, size_t count) {
   struct pollfd *pollfds = malloc(sizeof(struct pollfd) * count);
 
   signal(SIGINT, sig_handler);
+  signal(SIGTERM, sig_handler);
   signal(SIGHUP, sig_handler);
 
   for (int i = 0; i < count; i++) {
@@ -101,6 +108,14 @@ int main(void) {
 
   events = loop(fds, CPUS);
   printf("Handled events: %d\n", events);
+
+  for (int i = 0; i < CPUS; i++) {
+    uint64_t dropped = ioctl(fds[i], NT_DROPPED, 0);
+    uint64_t events = ioctl(fds[i], NT_EVENTS, 0);
+    printf("Events  on cpu %d: %lld\n", i, events);
+    printf("Dropped on cpu %d: %lld\n", i, dropped);
+    close(fds[i]);
+  }
 
   return 0;
 }

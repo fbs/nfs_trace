@@ -14,17 +14,9 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 
-
-#define IOC_MAGIC 'x'
-#define NT_DROPPED _IOR(IOC_MAGIC, 1, uint64_t)
-#define NT_EVENTS  _IOR(IOC_MAGIC, 2, uint64_t)
+#include "kernel/nfs_trace.h"
 
 #define CPUS 2
-
-typedef struct {
-  char type;
-  char path[255];
-} nt_event_t;
 
 int has_exit_sig = 0;
 
@@ -110,10 +102,11 @@ int main(void) {
   printf("Handled events: %d\n", events);
 
   for (int i = 0; i < CPUS; i++) {
-    uint64_t dropped = ioctl(fds[i], NT_DROPPED, 0);
-    uint64_t events = ioctl(fds[i], NT_EVENTS, 0);
-    printf("Events  on cpu %d: %lld\n", i, events);
-    printf("Dropped on cpu %d: %lld\n", i, dropped);
+    uint64_t dropped, events;
+    ioctl(fds[i], NT_IOC_DROPPED, &dropped);
+    ioctl(fds[i], NT_IOC_EVENTS, &events);
+    printf("Events  on cpu %d: %ld\n", i, events);
+    printf("Dropped on cpu %d: %ld\n", i, dropped);
     close(fds[i]);
   }
 

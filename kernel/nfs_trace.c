@@ -17,16 +17,13 @@
 #include <linux/vmalloc.h>
 #include <linux/wait.h>
 #include <linux/poll.h>
-#include <linux/ioctl.h>
 
 #include <linux/err.h>
 #include <linux/printk.h>
 
-MODULE_LICENSE("GPL");
+#include "nfs_trace.h"
 
-#define IOC_MAGIC 'x'
-#define NT_DROPPED _IOR(IOC_MAGIC, 1, __u64)
-#define NT_EVENTS  _IOR(IOC_MAGIC, 2, __u64)
+MODULE_LICENSE("GPL");
 
 #define ARG0 (regs->di)
 #define ARG1 (regs->si)
@@ -34,12 +31,7 @@ MODULE_LICENSE("GPL");
 #define ARG3 (regs->cx)
 
 #define DEV_NAME "nfs_trace"
-#define RING_BUF_SIZE (1024UL * sizeof(nt_ringbuf_entry))
-
-typedef struct {
-  char type;
-  char path[255];
-} nt_ringbuf_entry;
+#define RING_BUF_SIZE (1024UL * sizeof(nt_event_t))
 
 // Buf is full when head == tail -1
 typedef struct {
@@ -107,18 +99,22 @@ static unsigned int nt_poll(struct file *filp, poll_table *wait)
 }
 
 static long nt_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
+  int ret  = 0;
   nt_ringbuf *rb = filp->private_data;
+
   switch (cmd) {
-  case NT_DROPPED:
-    return rb->drops;
+  case NT_IOC_DROPPED:
+    put_user(rb->drops, (__u64 *)arg);
     break;
-  case NT_EVENTS:
-    return rb->events;
+  case NT_IOC_EVENTS:
+    put_user(rb->events, (__u64 *)arg);
     break;
   default:
-    return -EINVAL;
+    ret = -EINVAL;
     break;
   }
+
+  return ret;
 }
 
 static int nt_open(struct inode *inode, struct file *filp) {
@@ -267,7 +263,7 @@ static int handler_nfsd_vfs_read(struct kprobe *p, struct pt_regs *regs) {
   int size;
   int cpu;
   nt_ringbuf *rb;
-  nt_ringbuf_entry *rbe;
+  nt_event_t *rbe;
   __u32 head = 0, tail = 0, free = 0;
 
   if (file == NULL)
@@ -290,14 +286,14 @@ static int handler_nfsd_vfs_read(struct kprobe *p, struct pt_regs *regs) {
   else
     free = RING_BUF_SIZE + tail - head - 1;
 
-  if (likely(free > sizeof(nt_ringbuf_entry))) {
-    rbe = (nt_ringbuf_entry *)(rb->buf + head);
+  if (likely(free > sizeof(nt_event_t))) {
+    rbe = (nt_event_t *)(rb->buf + head);
     rbe->type = 'r';
     path = d_path(&file->f_path, buf, 254);
     size = 255 - (path - buf);
     memcpy(rbe->path, path, size);
 
-    rb->head = (head + sizeof(nt_ringbuf_entry)) % RING_BUF_SIZE;
+    rb->head = (head + sizeof(nt_event_t)) % RING_BUF_SIZE;
     rb->events++;
   } else {
     rb->drops++;

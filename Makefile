@@ -1,22 +1,15 @@
-MODULE_NAME := nfs_trace
-#$(MODULE_NAME)-objs := rkt_buf.o
-obj-m += nfs_trace.o
+.PHONY: module module-clean module-info cycle
 
-.PHONY: load unload cycle info
+all: module
 
-all:
-	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
+module:
+	make -C kernel module
 
-clean:
-	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
+module-clean:
+	make -C kernel clean
 
-load:
-	sudo insmod $(MODULE_NAME).ko
+module-info:
+	make -C kernel info
 
-unload:
-	sudo rmmod $(MODULE_NAME)
-
-cycle: all unload load
-
-info:
-	modinfo $(MODULE_NAME).ko
+cycle:
+	make -C kernel cycle

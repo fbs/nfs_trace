@@ -123,13 +123,24 @@ static int nt_open(struct inode *inode, struct file *filp) {
 
   g_consumers++;
   if (g_consumers == 1)
-    _register_kprobes();
+  {
+    if (_register_kprobes() < 0)
+    {
+      g_consumers--;
+      ret = -EIO;
+      goto exit;
+    }
+  }
 
   filp->private_data = rb;
 
   pr_info("Consumer registered, total: %d\n", g_consumers);
 
 exit:
+  if (ret < 0)
+  {
+    rb_free(rb);
+  }
   mutex_unlock(&g_lock);
   return ret;
 }

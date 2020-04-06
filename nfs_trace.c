@@ -37,11 +37,13 @@ typedef struct {
   __u64 head;  // head pointer offset
   __u64 tail;  // tail pointer offset
   __u64 drops; // dropped due to buffer full
+  wait_queue_head_t *wq;
 } nt_ringbuf;
 
 typedef struct {
   dev_t dev;
   struct cdev cdev;
+  wait_queue_head_t wq;
 } nt_device;
 
 static void _unregister_kprobes(void);
@@ -84,6 +86,7 @@ static int nt_open(struct inode *inode, struct file *filp) {
   nt_ringbuf *rb;
   int ret = 0;
   int cpu = iminor(filp->f_path.dentry->d_inode);
+  nt_device *dev = container_of(inode->i_cdev, nt_device, cdev);
 
   if (cpu > g_num_devices) {
     pr_err("cpu(%d) > g_ringbufs(%d)\n", cpu, g_num_devices);
@@ -102,6 +105,8 @@ static int nt_open(struct inode *inode, struct file *filp) {
     ret = -ENOMEM;
     goto exit;
   }
+
+  rb->wq = &dev->wq;
 
   g_consumers++;
   if (g_consumers == 1)
@@ -135,26 +140,28 @@ static ssize_t nt_read(struct file *filp, char __user *usr_buf, size_t len,
   __u64 remain = 0, size = 0;
   __u64 buf_data = 0;
   __u32 loop_idx = 0;
-  /* nt_ringbuf_entry * entry = NULL; */
+
+
+  if (rb->head == rb->tail) {
+    if (filp->f_flags & O_NONBLOCK) {
+      return -EAGAIN;
+    } else {
+      wait_event_interruptible(*rb->wq, rb->head != rb->tail);
+    }
+  }
 
   head = rb->head;
   tail = rb->tail;
 
-  if (head == tail)
-    return -EAGAIN;
-
-  /* entry = (rt_ringbuf_entry *) (rb_>buf + tail); */
-
   buf_data = (tail < head) ? head - tail : RING_BUF_SIZE - tail + head;
 
   remain = len = min(len, buf_data);
-  pr_info("head: %lld, tail: %lld, remain: %lld\n", head, tail, remain);
   while (remain) {
     size = (tail < head) ? head - tail : RING_BUF_SIZE - tail;
     size = min(len, size);
 
     // returns the amount of bytes NOT copied
-    if(copy_to_user(usr_buf, rb->buf + tail, size))
+    if (copy_to_user(usr_buf, rb->buf + tail, size))
       return -EFAULT;
 
     usr_buf += size;
@@ -165,7 +172,6 @@ static ssize_t nt_read(struct file *filp, char __user *usr_buf, size_t len,
   }
 
   rb->tail = tail;
-  pr_info("Updated tail to %lld\n", tail);
   return len;
 }
 
@@ -210,6 +216,7 @@ static int handler_nfsd_vfs_read(struct kprobe *p, struct pt_regs *regs) {
   cpu = smp_processor_id();
   rb = &g_ringbufs[cpu];
 
+  // No consumer for this cpu
   if (rb->buf == NULL)
     return 0;
 
@@ -232,11 +239,12 @@ static int handler_nfsd_vfs_read(struct kprobe *p, struct pt_regs *regs) {
     rbe->path[size] = '\n';
 
     rb->head = (head + sizeof(nt_ringbuf_entry)) % RING_BUF_SIZE;
-    pr_info("Got path: %c %s\n", rbe->type, rbe->path);
   } else {
     rb->drops++;
   }
   preempt_enable();
+
+  wake_up_interruptible(rb->wq);
   return 0;
 }
 
@@ -321,6 +329,7 @@ static int __init nfs_trace_init(void) {
       ret = -EFAULT;
       goto exit_err;
     }
+    init_waitqueue_head(&g_devices[idx].wq);
   }
 
   pr_info("nfs_trace started, major: %d\n", g_device_major);

@@ -12,6 +12,8 @@
 #include <linux/path.h>
 #include <linux/types.h>
 #include <linux/vmalloc.h>
+#include <linux/wait.h>
+#include <linux/poll.h>
 
 #include <linux/err.h>
 #include <linux/printk.h>
@@ -55,6 +57,7 @@ static int nt_open(struct inode *inode, struct file *filp);
 static int nt_release(struct inode *inode, struct file *filp);
 static ssize_t nt_read(struct file *filp, char __user *usr_buf, size_t count,
                        loff_t *ppos);
+static unsigned int nt_poll(struct file *filp, poll_table *wait);
 
 static int rb_init(nt_ringbuf *rb);
 static void rb_free(nt_ringbuf *rb);
@@ -70,6 +73,7 @@ struct file_operations g_fops = {
     .open = nt_open,
     .read = nt_read,
     .release = nt_release,
+    .poll = nt_poll,
 };
 
 static struct class *g_device_class = NULL;
@@ -81,6 +85,15 @@ static nt_device *g_devices = NULL;
 static nt_ringbuf *g_ringbufs = NULL;
 
 static DEFINE_MUTEX(g_lock);
+
+static unsigned int nt_poll(struct file *filp, poll_table *wait)
+{
+  nt_ringbuf *rb = filp->private_data;
+  poll_wait(filp, rb->wq, wait);
+  if (rb->head != rb->tail)
+    return POLLIN | POLLRDNORM;
+  return 0;
+}
 
 static int nt_open(struct inode *inode, struct file *filp) {
   nt_ringbuf *rb;
